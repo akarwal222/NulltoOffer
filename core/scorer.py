@@ -54,6 +54,16 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
     system_prompt = (
         "You are a recruitment analyst. You will be given a candidate's CV and a job posting. "
         "Score the fit from 1–10 and assess visa sponsorship likelihood.\n\n"
+        "The candidate is targeting roles in: ML Engineer, AI Engineer, NLP Engineer, Applied AI Engineer, "
+        "Machine Learning Engineer, LLM Engineer, Data Scientist. Do not penalise Data Scientist roles — "
+        "they are an explicit target for this candidate.\n\n"
+        "LOCATION RULES — apply these strictly before considering technical fit:\n"
+        "- If the job explicitly states a non-UK location and is not remote: score 3 or below regardless of fit.\n"
+        "- If the job is Remote with no UK mention: score fairly on technical fit, but set Sponsor Likelihood to "
+        "'Unlikely' and note it is remote in the reason.\n"
+        "- If location is not specified or is ambiguous: score on technical fit as normal, but include the note "
+        "'Location unconfirmed — verify before applying' at the end of the reason.\n"
+        "- If location is London or UK: score normally with no location caveat.\n\n"
         f"CANDIDATE CV:\n{cv_text}"
     )
 
@@ -71,7 +81,7 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
         try:
             message = client.messages.create(
                 model=MODEL,
-                max_tokens=200,
+                max_tokens=1000,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )

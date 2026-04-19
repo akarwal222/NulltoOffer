@@ -29,6 +29,10 @@ def _parse_gaps(text: str) -> dict:
             current = "hidden_strengths"
         elif stripped.startswith("-") and current:
             item = stripped.lstrip("- ").strip()
+            for emoji in ("🔴 ", "🟡 ", "🟢 ", "🔴", "🟡", "🟢"):
+                if item.startswith(emoji):
+                    item = item[len(emoji):].strip()
+                    break
             if item and len(result[current]) < 3:
                 result[current].append(item)
     return result
@@ -51,16 +55,18 @@ def analyse_gaps(jobs: list[dict]) -> list[dict]:
             f"Job Title: {job.get('title', '')}\n"
             f"Company: {job.get('company', '')}\n"
             f"Description:\n{job_desc}\n\n"
-            "Respond in exactly this format. Max 3 bullets per section, one concise line each:\n\n"
-            "Hard Gaps:\n- <item>\n\n"
-            "Soft Gaps:\n- <item>\n\n"
-            "Hidden Strengths:\n- <item>"
+            "Respond in exactly this format. Max 3 bullets per section, one concise line each.\n"
+            "Every item in Hard Gaps MUST begin with 🔴, every item in Soft Gaps MUST begin with 🟡, "
+            "every item in Hidden Strengths MUST begin with 🟢. Do not omit the emoji under any circumstances.\n\n"
+            "Hard Gaps:\n- 🔴 <item>\n\n"
+            "Soft Gaps:\n- 🟡 <item>\n\n"
+            "Hidden Strengths:\n- 🟢 <item>"
         )
 
         try:
             message = client.messages.create(
                 model=MODEL,
-                max_tokens=300,
+                max_tokens=1500,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )

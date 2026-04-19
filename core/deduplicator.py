@@ -12,8 +12,8 @@ def _load_seen() -> dict:
         return {}
     try:
         return json.loads(SEEN_JOBS_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        logger.warning("seen_jobs.json unreadable — starting fresh")
+    except Exception as exc:
+        logger.warning("seen_jobs.json unreadable (%s) — starting fresh", exc)
         return {}
 
 

@@ -1,67 +1,116 @@
 import os
 import time
 import logging
+import urllib.parse
 import requests
 
 logger = logging.getLogger(__name__)
 
 APIFY_BASE = "https://api.apify.com/v2"
-ACTOR_ID = "apify/linkedin-jobs-scraper"
+# Future upgrade: curious_coder/linkedin-jobs-search-scraper — also returns recruiter and company contact details, useful for Phase 2 networking feature
+ACTOR_ID = "curious_coder/linkedin-jobs-scraper"
 SEARCH_TERMS = [
-    "ML Engineer London",
-    "AI Engineer London",
-    "NLP Engineer London",
-    "Applied AI Engineer London",
-    "Machine Learning Engineer London",
-    "LLM Engineer London",
+    "ML Engineer",
+    "AI Engineer",
+    "NLP Engineer",
+    "Applied AI Engineer",
+    "Machine Learning Engineer",
+    "LLM Engineer",
+    "Data Scientist",
 ]
-MAX_RESULTS = 50
+COUNT_PER_URL = 30
+
+
+def _actor_url(actor_id: str) -> str:
+    return f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
+
+
+def _build_search_urls() -> list[str]:
+    base = "https://www.linkedin.com/jobs/search/"
+    return [
+        base + "?" + urllib.parse.urlencode({
+            "keywords": term,
+            "location": "London, United Kingdom",
+            "position": 1,
+            "pageNum": 0,
+        })
+        for term in SEARCH_TERMS
+    ]
 
 
 def _start_actor_run(token: str) -> str:
-    url = f"{APIFY_BASE}/acts/{ACTOR_ID}/runs"
+    url = _actor_url(ACTOR_ID)
     payload = {
-        "queries": SEARCH_TERMS,
-        "maxResults": MAX_RESULTS,
+        "urls": _build_search_urls(),
+        "count": COUNT_PER_URL,
+        "scrapeCompany": True,
+        "splitByLocation": False,
     }
     resp = requests.post(url, params={"token": token}, json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()["data"]["id"]
 
 
-def _wait_for_run(token: str, run_id: str, timeout: int = 300) -> str:
+def _wait_for_run(token: str, run_id: str, timeout: int = 180) -> None:
     url = f"{APIFY_BASE}/actor-runs/{run_id}"
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = requests.get(url, params={"token": token}, timeout=15)
         resp.raise_for_status()
-        data = resp.json()["data"]
-        status = data["status"]
+        status = resp.json()["data"]["status"]
         if status == "SUCCEEDED":
-            return data["defaultDatasetId"]
+            return
         if status in ("FAILED", "ABORTED", "TIMED-OUT"):
             raise RuntimeError(f"Apify run {run_id} ended with status: {status}")
-        time.sleep(10)
+        time.sleep(5)
     raise TimeoutError(f"Apify run {run_id} did not finish within {timeout}s")
 
 
-def _fetch_dataset(token: str, dataset_id: str) -> list[dict]:
-    url = f"{APIFY_BASE}/datasets/{dataset_id}/items"
-    resp = requests.get(url, params={"token": token, "format": "json"}, timeout=30)
+def _fetch_results(token: str, run_id: str) -> list[dict]:
+    url = f"{APIFY_BASE}/actor-runs/{run_id}/dataset/items"
+    resp = requests.get(url, params={"token": token, "clean": "true", "format": "json", "limit": 200}, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
+def _extract_salary(item: dict) -> str:
+    insights = item.get("salaryInsights") or {}
+    breakdown = insights.get("compensationBreakdown") or []
+    if breakdown and isinstance(breakdown, list):
+        first = breakdown[0]
+        low = first.get("minSalary")
+        high = first.get("maxSalary")
+        if low and high:
+            return f"£{int(float(low)):,}–£{int(float(high)):,}"
+        if low:
+            return f"£{int(float(low)):,}+"
+
+    salary_info = item.get("salaryInfo") or []
+    if salary_info and isinstance(salary_info, list):
+        return "–".join(str(s) for s in salary_info if s)
+
+    return ""
+
+
 def _normalise(item: dict) -> dict:
+    workplace = item.get("workplaceTypes") or []
+    if isinstance(workplace, list):
+        workplace = ", ".join(workplace)
+
     return {
-        "title": item.get("title") or item.get("jobTitle") or "",
-        "company": item.get("companyName") or item.get("company") or "",
+        "title": item.get("title") or "",
+        "company": item.get("companyName") or "",
         "location": item.get("location") or "",
-        "salary": item.get("salary") or item.get("salaryRange") or "",
-        "description": item.get("description") or item.get("jobDescription") or "",
-        "url": item.get("jobUrl") or item.get("url") or "",
+        "salary": _extract_salary(item),
+        "description": item.get("descriptionText") or "",
+        "url": item.get("link") or "",
         "source": "LinkedIn Jobs",
         "type": "listing",
+        "seniority_level": item.get("seniorityLevel") or "",
+        "employment_type": item.get("employmentType") or "",
+        "workplace_type": workplace,
+        "posted_at": item.get("postedAt") or "",
+        "applicants_count": item.get("applicantsCount") or "",
     }
 
 
@@ -72,9 +121,9 @@ def scrape_jobs() -> list[dict]:
     run_id = _start_actor_run(token)
     logger.info("Actor run started: %s — waiting for completion...", run_id)
 
-    dataset_id = _wait_for_run(token, run_id)
-    raw = _fetch_dataset(token, dataset_id)
+    _wait_for_run(token, run_id)
+    raw = _fetch_results(token, run_id)
 
-    jobs = [_normalise(item) for item in raw if item.get("jobUrl") or item.get("url")]
+    jobs = [_normalise(item) for item in raw if item.get("link")]
     logger.info("Jobs scraper: %d listings retrieved", len(jobs))
     return jobs
