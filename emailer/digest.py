@@ -94,10 +94,17 @@ def _format_job_html(job: dict) -> str:
         poster_name = job.get("poster_name") or "the poster"
         poster_title = job.get("poster_title") or ""
         poster_ref = f"{poster_name} ({poster_title})" if poster_title else poster_name
+        no_action_html = (
+            '<div style="background:#fef2f2;border-left:3px solid #ef4444;color:#991b1b;'
+            'font-size:12px;padding:8px 12px;border-radius:4px;margin-top:8px;">'
+            '⚠️ No direct apply action found — verify before reaching out.'
+            '</div>'
+        ) if (job.get("apply_action") or "") == "none" else ""
         cta_html = (
             f'<div class="action-box">'
             f'<strong>📢 Action:</strong> DM {poster_ref} directly — do not use apply button'
             f'</div>'
+            f'{no_action_html}'
             f'<div style="margin-top:8px;font-size:12px;color:#6b7280;">Post: <a href="{url}">{url}</a></div>'
         )
     else:
@@ -180,6 +187,8 @@ def _format_job_text(job: dict) -> str:
         poster_title = job.get("poster_title") or ""
         poster_ref = f"{poster_name} ({poster_title})" if poster_title else poster_name
         lines.append(f"Action: DM {poster_ref} directly — do not use apply button")
+        if (job.get("apply_action") or "") == "none":
+            lines.append("⚠️ No direct apply action found — verify before reaching out.")
         lines.append(f"Post: {url}")
     else:
         lines.append(f"Apply: {url}")

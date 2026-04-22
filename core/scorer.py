@@ -9,6 +9,10 @@ CV_PATH = Path(__file__).parent.parent / "data" / "my_cv.txt"
 SCORE_THRESHOLD = 7
 MODEL = "claude-haiku-4-5-20251001"
 
+_COMMENTARY_KEYWORDS = frozenset({
+    "journalist", "reporter", "newsletter", "writer", "editor", "media",
+})
+
 _NO_SPONSOR_STATUSES = frozenset({
     "UK Citizen / Indefinite Leave to Remain",
     "EU Settled / Pre-Settled Status",
@@ -20,6 +24,15 @@ _SWITCH_SPONSOR_STATUSES = frozenset({
     "Skilled Worker Visa (already sponsored)",
 })
 _VALID_SPONSOR = frozenset({"Likely", "Unlikely", "Unknown", "N/A"})
+
+
+def _is_commentary_post(job: dict) -> bool:
+    if job.get("type") != "informal_post":
+        return False
+    if job.get("apply_action") != "none":
+        return False
+    poster_title = (job.get("poster_title") or "").lower()
+    return any(kw in poster_title for kw in _COMMENTARY_KEYWORDS)
 
 
 def _load_cv() -> str:
@@ -146,6 +159,9 @@ def score_jobs(
 
     scored = []
     for job in jobs:
+        if _is_commentary_post(job):
+            logger.debug("COMMENTARY  score=2  %s @ %s", job.get("title"), job.get("company"))
+            continue
         job_text = _build_job_text(job)
         user_prompt = (
             f"{job_text}\n\n"

@@ -252,19 +252,27 @@ def _extract_salary(post_text: str) -> str:
 def _extract_post_fields(post_text: str, poster_name: str, poster_title: str) -> dict:
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     prompt = (
-        "Extract structured information from this LinkedIn job post. "
-        "Return ONLY a valid JSON object with these exact keys:\n"
-        '{\n'
-        '  "title": "job title being advertised, or null if not a job post",\n'
-        '  "company": "hiring company name, or \'Confidential Client\' if the poster is a recruiter not naming their client",\n'
-        '  "location": "job location — city/country, \'Remote\', or \'Location not specified\'",\n'
-        '  "salary": "salary range as string e.g. \'£70K–£100K + equity\', or empty string if not mentioned",\n'
-        '  "is_job_post": true or false\n'
-        "}\n"
-        "Do not include any explanation, markdown, or text outside the JSON object.\n\n"
-        f"Poster name: {poster_name}\n"
-        f"Poster title: {poster_title}\n"
-        f"Post text:\n{post_text}"
+        "You are analysing a LinkedIn post to determine if it is a direct job posting or hiring announcement.\n\n"
+        "Return ONLY a valid JSON object:\n"
+        "{\n"
+        '  "title": "exact job title being hired for, or null",\n'
+        '  "company": "company doing the hiring, or \'Confidential Client\' if recruiter not naming client",\n'
+        '  "location": "job location or \'Remote\' or \'Location not specified\'",\n'
+        '  "salary": "salary range as string or empty string",\n'
+        '  "is_job_post": true or false,\n'
+        '  "apply_action": "DM poster / email address found / apply link / none"\n'
+        "}\n\n"
+        "Set is_job_post to TRUE only if:\n"
+        "- Someone is actively hiring for a specific role right now\n"
+        "- There is a clear call to action (DM me, apply here, send CV, email me)\n\n"
+        "Set is_job_post to FALSE if:\n"
+        "- The post is news or commentary ABOUT a job or company\n"
+        "- The post is sharing someone else's job posting\n"
+        "- The post is a newsletter, article, or opinion piece\n"
+        "- There is no direct hiring call to action\n"
+        "- The poster is a journalist, newsletter writer, or commentator\n\n"
+        f"Post text:\n{post_text}\n"
+        f"Poster title: {poster_title}"
     )
     message = client.messages.create(
         model=MODEL,
@@ -299,6 +307,7 @@ def _normalise(item: dict) -> dict | None:
             "company": company,
             "location": fields.get("location") or "Location not specified",
             "salary": fields.get("salary") or "",
+            "apply_action": fields.get("apply_action") or "none",
             "poster_name": poster_name,
             "poster_title": poster_title,
             "post_text": post_text,
@@ -314,6 +323,7 @@ def _normalise(item: dict) -> dict | None:
         "company": _extract_company(item, author, poster_title, post_text, poster_name),
         "location": _extract_location(post_text),
         "salary": _extract_salary(post_text),
+        "apply_action": "none",
         "poster_name": poster_name,
         "poster_title": poster_title,
         "post_text": post_text,
