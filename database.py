@@ -36,6 +36,7 @@ def save_job(job: dict) -> None:
 def save_user_job(user_job: dict) -> None:
     doc = {**user_job}
     doc.setdefault("status", "new")
+    doc.setdefault("is_saved", False)
     doc.setdefault("created_at", datetime.now(timezone.utc))
     _get_db()["user_jobs"].update_one(
         {"clerk_user_id": doc["clerk_user_id"], "url": doc["url"]},

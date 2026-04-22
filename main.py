@@ -20,9 +20,15 @@ _SCORE_THRESHOLD = 7
 _MODEL = "claude-haiku-4-5-20251001"
 
 
-def _score_job_for_user(job: dict, cv_text: str, client) -> dict | None:
+def _score_job_for_user(
+    job: dict,
+    cv_text: str,
+    client,
+    locations: list[str] | None = None,
+    visa_status: str = "",
+) -> dict | None:
     """Score a single job against an arbitrary cv_text; returns scored dict or None if below threshold."""
-    import anthropic
+    from core.scorer import _build_location_rules, _build_sponsor_rules, _parse_response
 
     parts = [
         f"Title: {job.get('title', '')}",
@@ -37,13 +43,13 @@ def _score_job_for_user(job: dict, cv_text: str, client) -> dict | None:
         parts.append(f"Description: {job.get('description', '')}")
     job_text = "\n".join(parts)
 
+    location_rules = _build_location_rules(locations or [])
+    sponsor_rules, sponsor_hint = _build_sponsor_rules(visa_status)
+
     system_prompt = (
         "You are a recruitment analyst. Score job fit from 1–10 and assess visa sponsorship likelihood.\n\n"
-        "LOCATION RULES:\n"
-        "- Non-UK location, not remote: score 3 or below.\n"
-        "- Remote with no UK mention: score on technical fit, Sponsor Likelihood = Unlikely.\n"
-        "- Location unspecified: score normally, note 'Location unconfirmed — verify before applying'.\n"
-        "- London or UK: score normally.\n\n"
+        f"{location_rules}\n\n"
+        f"{sponsor_rules}\n\n"
         f"CANDIDATE CV:\n{cv_text}"
     )
     user_prompt = (
@@ -51,7 +57,7 @@ def _score_job_for_user(job: dict, cv_text: str, client) -> dict | None:
         "Respond in exactly this format (3 lines only):\n"
         "Score: <1-10>\n"
         "Reason: <2 lines max>\n"
-        "Sponsor Likelihood: <Likely|Unlikely|Unknown>"
+        f"Sponsor Likelihood: <{sponsor_hint}>"
     )
 
     try:
@@ -61,20 +67,7 @@ def _score_job_for_user(job: dict, cv_text: str, client) -> dict | None:
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
-        result = {"score": 0, "reason": "", "sponsor_likelihood": "Unknown"}
-        for line in message.content[0].text.strip().splitlines():
-            line = line.strip()
-            if line.lower().startswith("score:"):
-                try:
-                    result["score"] = int(line.split(":", 1)[1].strip().split("/")[0])
-                except ValueError:
-                    pass
-            elif line.lower().startswith("reason:"):
-                result["reason"] = line.split(":", 1)[1].strip()
-            elif line.lower().startswith("sponsor"):
-                val = line.split(":", 1)[1].strip()
-                if val in ("Likely", "Unlikely", "Unknown"):
-                    result["sponsor_likelihood"] = val
+        result = _parse_response(message.content[0].text)
         if result["score"] >= _SCORE_THRESHOLD:
             return {**job, **result}
     except Exception as exc:
@@ -317,13 +310,15 @@ def main():
             for user in users:
                 clerk_id = user.get("clerk_user_id", "")
                 cv_text = user.get("cv_text", "")
+                locations = user.get("locations") or []
+                visa_status = user.get("visa_status") or ""
                 if not clerk_id or not cv_text:
                     continue
                 for job in analysed:
                     url = job.get("url", "")
                     if not url or user_job_exists(clerk_id, url):
                         continue
-                    scored_job = _score_job_for_user(job, cv_text, ai_client)
+                    scored_job = _score_job_for_user(job, cv_text, ai_client, locations, visa_status)
                     if scored_job is None:
                         continue
                     gaps = _analyse_gaps_for_user(scored_job, cv_text, ai_client)

@@ -9,6 +9,18 @@ CV_PATH = Path(__file__).parent.parent / "data" / "my_cv.txt"
 SCORE_THRESHOLD = 7
 MODEL = "claude-haiku-4-5-20251001"
 
+_NO_SPONSOR_STATUSES = frozenset({
+    "UK Citizen / Indefinite Leave to Remain",
+    "EU Settled / Pre-Settled Status",
+})
+_STRICT_SPONSOR_STATUSES = frozenset({
+    "Require Sponsorship from employer",
+})
+_SWITCH_SPONSOR_STATUSES = frozenset({
+    "Skilled Worker Visa (already sponsored)",
+})
+_VALID_SPONSOR = frozenset({"Likely", "Unlikely", "Unknown", "N/A"})
+
 
 def _load_cv() -> str:
     return CV_PATH.read_text(encoding="utf-8")
@@ -29,6 +41,69 @@ def _build_job_text(job: dict) -> str:
     return "\n".join(parts)
 
 
+def _build_location_rules(locations: list[str]) -> str:
+    if not locations:
+        locations = ["London", "UK"]
+    accept_remote = any("remote" in loc.lower() for loc in locations)
+    loc_list = ", ".join(locations)
+    lines = [
+        "LOCATION RULES — apply strictly before considering technical fit:",
+        f"- Candidate's preferred locations: {loc_list}.",
+        "- If the job location matches ANY preferred location: score normally, no location caveat.",
+    ]
+    if accept_remote:
+        lines.append("- Remote jobs: score on technical fit as normal.")
+    else:
+        lines.append(
+            "- Remote jobs with no preferred-location mention: score on technical fit "
+            "but note it is remote in the reason."
+        )
+    lines.append(
+        "- If the job location matches NONE of the preferred locations and is not remote: "
+        "score 3 or below regardless of technical fit."
+    )
+    lines.append(
+        "- Location unspecified or ambiguous: score on technical fit, "
+        "append 'Location unconfirmed — verify before applying' to reason."
+    )
+    return "\n".join(lines)
+
+
+def _build_sponsor_rules(visa_status: str) -> tuple[str, str]:
+    """Returns (sponsor_rules_text, sponsor_likelihood_format_hint)."""
+    if visa_status in _NO_SPONSOR_STATUSES:
+        return (
+            "VISA / SPONSOR RULES:\n"
+            "- Candidate does not require visa sponsorship. Ignore sponsor licence requirements entirely.\n"
+            "- Always output Sponsor Likelihood: N/A.",
+            "N/A",
+        )
+    if visa_status in _STRICT_SPONSOR_STATUSES:
+        return (
+            "VISA / SPONSOR RULES:\n"
+            "- Candidate requires employer sponsorship to work in the UK.\n"
+            "- Reduce score by up to 2 points for jobs where sponsorship is Unlikely.\n"
+            "- Likely = large/established company known to sponsor; "
+            "Unlikely = SME or startup with no evidence of sponsoring; Unknown = insufficient info.",
+            "Likely|Unlikely|Unknown",
+        )
+    if visa_status in _SWITCH_SPONSOR_STATUSES:
+        return (
+            "VISA / SPONSOR RULES:\n"
+            "- Candidate is on a Skilled Worker Visa; switching companies requires the new employer to become a new sponsor.\n"
+            "- Likely = large/established company known to sponsor; Unlikely = SME or startup; Unknown = insufficient info.",
+            "Likely|Unlikely|Unknown",
+        )
+    # Graduate Route Visa, Youth Mobility Scheme, or unrecognised
+    return (
+        "VISA / SPONSOR RULES:\n"
+        "- Candidate is on a time-limited UK visa (Graduate Route or Youth Mobility Scheme).\n"
+        "- Flag sponsor likelihood for future reference — it will matter when this visa expires.\n"
+        "- Likely = large/established company known to sponsor; Unlikely = SME or startup; Unknown = insufficient info.",
+        "Likely|Unlikely|Unknown",
+    )
+
+
 def _parse_response(text: str) -> dict:
     result = {"score": 0, "reason": "", "sponsor_likelihood": "Unknown"}
     for line in text.strip().splitlines():
@@ -42,14 +117,21 @@ def _parse_response(text: str) -> dict:
             result["reason"] = line.split(":", 1)[1].strip()
         elif line.lower().startswith("sponsor"):
             val = line.split(":", 1)[1].strip()
-            if val in ("Likely", "Unlikely", "Unknown"):
+            if val in _VALID_SPONSOR:
                 result["sponsor_likelihood"] = val
     return result
 
 
-def score_jobs(jobs: list[dict]) -> list[dict]:
+def score_jobs(
+    jobs: list[dict],
+    locations: list[str] | None = None,
+    visa_status: str = "",
+) -> list[dict]:
     cv_text = _load_cv()
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    location_rules = _build_location_rules(locations or [])
+    sponsor_rules, sponsor_hint = _build_sponsor_rules(visa_status)
 
     system_prompt = (
         "You are a recruitment analyst. You will be given a candidate's CV and a job posting. "
@@ -57,13 +139,8 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
         "The candidate is targeting roles in: ML Engineer, AI Engineer, NLP Engineer, Applied AI Engineer, "
         "Machine Learning Engineer, LLM Engineer, Data Scientist. Do not penalise Data Scientist roles — "
         "they are an explicit target for this candidate.\n\n"
-        "LOCATION RULES — apply these strictly before considering technical fit:\n"
-        "- If the job explicitly states a non-UK location and is not remote: score 3 or below regardless of fit.\n"
-        "- If the job is Remote with no UK mention: score fairly on technical fit, but set Sponsor Likelihood to "
-        "'Unlikely' and note it is remote in the reason.\n"
-        "- If location is not specified or is ambiguous: score on technical fit as normal, but include the note "
-        "'Location unconfirmed — verify before applying' at the end of the reason.\n"
-        "- If location is London or UK: score normally with no location caveat.\n\n"
+        f"{location_rules}\n\n"
+        f"{sponsor_rules}\n\n"
         f"CANDIDATE CV:\n{cv_text}"
     )
 
@@ -75,7 +152,7 @@ def score_jobs(jobs: list[dict]) -> list[dict]:
             "Respond in exactly this format (3 lines only):\n"
             "Score: <1-10>\n"
             "Reason: <2 lines max explaining the fit>\n"
-            "Sponsor Likelihood: <Likely|Unlikely|Unknown>"
+            f"Sponsor Likelihood: <{sponsor_hint}>"
         )
 
         try:
