@@ -1,7 +1,9 @@
+import concurrent.futures
 import logging
 import os
 import sys
 import smtplib
+import requests
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -19,6 +21,41 @@ logger = logging.getLogger("GetHired")
 _SCORE_THRESHOLD = 7
 _MODEL = "claude-haiku-4-5-20251001"
 
+_LOCATION_CITY_MAP = [
+    ("new york", "New York"),
+    ("san francisco", "San Francisco"),
+    ("london", "London"),
+    ("delhi", "Delhi"),
+    ("mumbai", "Mumbai"),
+    ("bangalore", "Bangalore"),
+]
+
+
+def _extract_city(location: str) -> str:
+    loc_lower = location.lower().strip()
+    if loc_lower.startswith("remote"):
+        return "Remote"
+    for key, city in _LOCATION_CITY_MAP:
+        if key in loc_lower:
+            return city
+    if "," in location:
+        return location.split(",")[0].strip()
+    return location.strip()
+
+
+def _build_search_terms(users: list[dict]) -> list[str]:
+    from collections import Counter
+    term_counts: Counter = Counter()
+    for user in users:
+        roles = user.get("target_roles") or []
+        locations = user.get("locations") or []
+        for role in roles:
+            for location in locations:
+                city = _extract_city(location)
+                term_counts[f"{role} {city}"] += 1
+    sorted_terms = [t for t, _ in term_counts.most_common()]
+    return sorted_terms[:20]
+
 
 def _score_job_for_user(
     job: dict,
@@ -27,8 +64,10 @@ def _score_job_for_user(
     locations: list[str] | None = None,
     visa_status: str = "",
 ) -> dict | None:
-    """Score a single job against an arbitrary cv_text; returns scored dict or None if below threshold."""
-    from core.scorer import _build_location_rules, _build_sponsor_rules, _parse_response
+    from core.scorer import _build_location_rules, _build_sponsor_rules, _parse_response, _is_commentary_post
+
+    if _is_commentary_post(job):
+        return None
 
     parts = [
         f"Title: {job.get('title', '')}",
@@ -71,12 +110,11 @@ def _score_job_for_user(
         if result["score"] >= _SCORE_THRESHOLD:
             return {**job, **result}
     except Exception as exc:
-        logger.warning("Per-user scoring failed for '%s': %s", job.get("title"), exc)
+        logger.warning("Scoring failed for '%s': %s", job.get("title"), exc)
     return None
 
 
-def _analyse_gaps_for_user(job: dict, cv_text: str, client) -> dict:
-    """Run gap analysis for a single job against an arbitrary cv_text."""
+def _analyse_gap_for_job(job: dict, cv_text: str, client) -> dict:
     system_prompt = (
         "You are a career coach performing CV gap analysis. "
         "Compare a job description against the candidate's CV and identify gaps and strengths.\n\n"
@@ -120,12 +158,100 @@ def _analyse_gaps_for_user(job: dict, cv_text: str, client) -> dict:
                 if item and len(gaps[current]) < 3:
                     gaps[current].append(item)
     except Exception as exc:
-        logger.warning("Per-user gap analysis failed for '%s': %s", job.get("title"), exc)
+        logger.warning("Gap analysis failed for '%s': %s", job.get("title"), exc)
 
     return gaps
 
 
-def _send_notification_email(jobs: list[dict]) -> None:
+def filter_jobs_for_user(jobs: list[dict], target_roles: list[str]) -> list[dict]:
+    if len(jobs) < 50:
+        return jobs
+
+    role_keywords = {word.lower() for role in target_roles for word in role.split()}
+
+    result = []
+    for job in jobs:
+        if job.get("type") == "listing":
+            result.append(job)
+        else:
+            title = (job.get("title") or "").lower()
+            if any(kw in title for kw in role_keywords):
+                result.append(job)
+    return result
+
+
+def score_jobs_for_user(
+    jobs: list[dict],
+    cv_text: str,
+    locations: list[str],
+    visa_status: str,
+    requires_sponsorship: bool,
+) -> list[dict]:
+    import anthropic
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    scored = []
+    for job in jobs:
+        result = _score_job_for_user(job, cv_text, client, locations, visa_status)
+        if result is not None:
+            scored.append(result)
+    return scored
+
+
+def analyse_gaps_for_user(jobs: list[dict], cv_text: str) -> list[dict]:
+    import anthropic
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    results = []
+    for job in jobs:
+        gaps = _analyse_gap_for_job(job, cv_text, client)
+        results.append({**job, "gap_analysis": gaps})
+    return results
+
+
+def write_user_jobs_to_mongo(jobs: list[dict], clerk_user_id: str) -> None:
+    from database import save_job, save_user_job
+    for job in jobs:
+        url = job.get("url", "")
+        if not url:
+            continue
+        save_job(job)
+        gap_analysis = job.get("gap_analysis", {})
+        save_user_job({
+            "clerk_user_id": clerk_user_id,
+            "url": url,
+            "score": job.get("score", 0),
+            "reason": job.get("reason", ""),
+            "sponsor_likelihood": job.get("sponsor_likelihood", "Unknown"),
+            "hard_gaps": gap_analysis.get("hard_gaps", []),
+            "soft_gaps": gap_analysis.get("soft_gaps", []),
+            "hidden_strengths": gap_analysis.get("hidden_strengths", []),
+            "created_at": datetime.now(timezone.utc),
+        })
+
+
+def get_user_email(clerk_user_id: str) -> str | None:
+    clerk_secret = os.environ.get("CLERK_SECRET_KEY")
+    if not clerk_secret:
+        logger.warning("CLERK_SECRET_KEY not set — cannot fetch email for %s", clerk_user_id)
+        return None
+    try:
+        resp = requests.get(
+            f"https://api.clerk.com/v1/users/{clerk_user_id}",
+            headers={"Authorization": f"Bearer {clerk_secret}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        emails = resp.json().get("email_addresses", [])
+        if emails:
+            return emails[0].get("email_address")
+    except Exception as exc:
+        logger.warning("Failed to fetch email for %s: %s", clerk_user_id, exc)
+    return None
+
+
+def send_notification_email(jobs: list[dict], email: str, user: dict) -> None:
+    if not jobs:
+        return
+
     gmail_address = os.environ["GMAIL_ADDRESS"]
     gmail_password = os.environ["GMAIL_APP_PASSWORD"]
     webapp_url = os.environ.get("WEBAPP_URL", "https://nulltooffer.app")
@@ -136,7 +262,7 @@ def _send_notification_email(jobs: list[dict]) -> None:
     top4 = sorted(jobs, key=lambda j: j.get("score", 0), reverse=True)[:4]
     overflow = n - len(top4)
 
-    subject = f"🎯 NullToOffer — {n} new match{'es' if n != 1 else ''} today"
+    subject = f"🎯 NullToOffer — {n} new match{'es' if n != 1 else ''} for you today"
 
     def _score_badge(score: int) -> str:
         return (
@@ -160,7 +286,6 @@ def _send_notification_email(jobs: list[dict]) -> None:
         )
 
     cards_html = "".join(_card_html(j) for j in top4)
-
     overflow_html = (
         f'<p style="font-size:13px;color:#6b7280;text-align:center;margin:4px 0 24px;">'
         f'+ {overflow} more match{"es" if overflow != 1 else ""} on your dashboard</p>'
@@ -172,7 +297,10 @@ def _send_notification_email(jobs: list[dict]) -> None:
         f"  {i+1}. {j.get('title','')} — {j.get('company','')}  [{j.get('score',0)}/10]"
         for i, j in enumerate(top4)
     )
-    overflow_text = f"\n+ {overflow} more match{'es' if overflow != 1 else ''} waiting." if overflow > 0 else ""
+    overflow_text = (
+        f"\n+ {overflow} more match{'es' if overflow != 1 else ''} waiting."
+        if overflow > 0 else ""
+    )
 
     html_body = f"""<!DOCTYPE html>
 <html lang="en">
@@ -217,7 +345,7 @@ def _send_notification_email(jobs: list[dict]) -> None:
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = gmail_address
-    msg["To"] = gmail_address
+    msg["To"] = email
     msg.attach(MIMEText(plain_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
@@ -225,138 +353,140 @@ def _send_notification_email(jobs: list[dict]) -> None:
         server.ehlo()
         server.starttls()
         server.login(gmail_address, gmail_password)
-        server.sendmail(gmail_address, gmail_address, msg.as_string())
+        server.sendmail(gmail_address, email, msg.as_string())
 
-    logger.info("Notification email sent (%d matches)", n)
+    logger.info("Notification email sent to %s (%d matches)", email, n)
+
+
+def process_user(user: dict, all_jobs: list[dict]) -> int:
+    clerk_user_id = user["clerk_user_id"]
+    cv_text = user.get("cv_text", "")
+    target_roles = user.get("target_roles", [])
+    locations = user.get("locations", [])
+    visa_status = user.get("visa_status", "")
+    requires_sponsorship = user.get("requires_sponsorship", False)
+
+    if not cv_text:
+        logger.warning("User %s has no CV uploaded — skipping", clerk_user_id)
+        return 0
+
+    relevant_jobs = filter_jobs_for_user(all_jobs, target_roles)
+    scored_jobs = score_jobs_for_user(relevant_jobs, cv_text, locations, visa_status, requires_sponsorship)
+    analysed_jobs = analyse_gaps_for_user(scored_jobs, cv_text)
+    write_user_jobs_to_mongo(analysed_jobs, clerk_user_id)
+
+    email = get_user_email(clerk_user_id)
+    if email:
+        send_notification_email(analysed_jobs, email, user)
+    else:
+        logger.warning("Could not retrieve email for user %s — skipping notification", clerk_user_id)
+
+    return len(analysed_jobs)
 
 
 def main():
-    import anthropic
     from scrapers.jobs_scraper import scrape_jobs
     from scrapers.linkedin_posts_scraper import scrape_linkedin_posts
-    # Indeed scraper removed — $6/1k too costly on free tier. Re-add with misceres/indeed-scraper when on paid plan.
     from core.deduplicator import deduplicate, mark_seen
-    from core.scorer import score_jobs
-    from core.gap_analyser import analyse_gaps
-    from emailer.digest import send_digest
-    from database import (
-        get_all_users, save_job, save_user_job, user_job_exists,
-    )
+    from database import get_all_users
 
-    # ── 1. Scrape LinkedIn structured listings ───────────────────────────────
-    print("\n[1/8] Scraping LinkedIn job listings...")
+    # ── Step 0: Load all users from MongoDB ──────────────────────────────────
+    print("\n[Step 0] Loading users from MongoDB...")
+    try:
+        users = get_all_users()
+    except Exception as exc:
+        logger.error("MongoDB connection failed: %s", exc)
+        sys.exit(1)
+
+    if not users:
+        logger.info("No registered users found — skipping pipeline run")
+        sys.exit(0)
+
+    print(f"         → {len(users)} user(s) loaded")
+
+    # ── Step 1: Build combined search terms ──────────────────────────────────
+    print("\n[Step 1] Building combined search terms from user preferences...")
+    valid_users: list[dict] = []
+    for user in users:
+        clerk_id = user.get("clerk_user_id", "unknown")
+        if not user.get("target_roles") or not user.get("locations"):
+            logger.warning("User %s has incomplete preferences — skipping.", clerk_id)
+        else:
+            valid_users.append(user)
+
+    if not valid_users:
+        logger.info("No users with complete preferences — skipping pipeline run")
+        sys.exit(0)
+
+    search_terms = _build_search_terms(valid_users)
+    print(f"         → {len(search_terms)} combined search term(s)")
+    logger.info("Search terms: %s", search_terms)
+
+    # ── Step 2: Scrape once for all combined terms ────────────────────────────
+    print("\n[Step 2] Scraping LinkedIn job listings...")
     try:
         listings = scrape_jobs()
-        print(f"      → {len(listings)} listings retrieved")
+        print(f"         → {len(listings)} listings retrieved")
     except Exception as exc:
         logger.error("LinkedIn jobs scraper failed: %s", exc)
         listings = []
 
-    # ── 2. Scrape LinkedIn posts ─────────────────────────────────────────────
-    print("\n[2/8] Scraping LinkedIn hiring posts...")
+    print("\n[Step 3] Scraping LinkedIn hiring posts...")
     try:
         posts = scrape_linkedin_posts()
-        print(f"      → {len(posts)} posts retrieved")
+        print(f"         → {len(posts)} posts retrieved")
     except Exception as exc:
         logger.error("LinkedIn posts scraper failed: %s", exc)
         posts = []
 
-    # ── 3. Merge ─────────────────────────────────────────────────────────────
-    print("\n[3/8] Merging sources...")
     all_jobs = listings + posts
-    print(f"      → {len(all_jobs)} total jobs")
+    print(f"         → {len(all_jobs)} total jobs combined")
 
-    # ── 4. Deduplicate ────────────────────────────────────────────────────────
-    print("\n[4/8] Deduplicating against seen jobs...")
+    # ── Step 3: Deduplicate ───────────────────────────────────────────────────
+    print("\n[Step 4] Deduplicating against seen jobs...")
     try:
         new_jobs = deduplicate(all_jobs)
-        print(f"      → {len(new_jobs)} new (unseen) jobs")
+        print(f"         → {len(new_jobs)} new (unseen) jobs")
     except Exception as exc:
         logger.error("Deduplication failed: %s", exc)
         new_jobs = all_jobs
 
-    # ── 5. Score ──────────────────────────────────────────────────────────────
-    print("\n[5/8] Scoring jobs with Claude Haiku...")
-    try:
-        scored = score_jobs(new_jobs)
-        print(f"      → {len(scored)} jobs passed the score threshold (≥7/10)")
-    except Exception as exc:
-        logger.error("Scoring failed: %s", exc)
-        scored = []
+    # ── Steps 4-7: Per-user parallel processing ───────────────────────────────
+    print(f"\n[Steps 5-8] Processing {len(valid_users)} user(s) in parallel (max 3 workers)...")
+    total_jobs_written = 0
+    skipped_users: list[str] = []
 
-    # ── 6. Gap analysis ───────────────────────────────────────────────────────
-    print("\n[6/8] Running gap analysis on top matches...")
-    try:
-        analysed = analyse_gaps(scored)
-        print(f"      → Gap analysis complete for {len(analysed)} jobs")
-    except Exception as exc:
-        logger.error("Gap analysis failed: %s", exc)
-        analysed = scored
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        future_to_user = {
+            executor.submit(process_user, user, new_jobs): user
+            for user in valid_users
+        }
+        for future in concurrent.futures.as_completed(future_to_user):
+            user = future_to_user[future]
+            clerk_id = user.get("clerk_user_id", "unknown")
+            try:
+                count = future.result()
+                total_jobs_written += count
+                logger.info("User %s: %d job(s) matched and written", clerk_id, count)
+            except Exception as exc:
+                logger.error("Processing failed for user %s: %s", clerk_id, exc)
+                skipped_users.append(clerk_id)
 
-    # ── 7. Write to MongoDB ───────────────────────────────────────────────────
-    print("\n[7/8] Writing to MongoDB...")
-    try:
-        users = get_all_users()
-        print(f"      → {len(users)} registered user(s) found")
+    # ── Step 8: Summary log ───────────────────────────────────────────────────
+    processed = len(valid_users) - len(skipped_users)
+    print(f"\n[Summary]")
+    print(f"  Users processed:   {processed}/{len(valid_users)}")
+    print(f"  Total jobs written: {total_jobs_written}")
+    if skipped_users:
+        print(f"  Skipped (errors):  {', '.join(skipped_users)}")
 
-        jobs_saved = 0
-        for job in analysed:
-            save_job(job)
-            jobs_saved += 1
-
-        user_jobs_written = 0
-        if users:
-            ai_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-            for user in users:
-                clerk_id = user.get("clerk_user_id", "")
-                cv_text = user.get("cv_text", "")
-                locations = user.get("locations") or []
-                visa_status = user.get("visa_status") or ""
-                if not clerk_id or not cv_text:
-                    continue
-                for job in analysed:
-                    url = job.get("url", "")
-                    if not url or user_job_exists(clerk_id, url):
-                        continue
-                    scored_job = _score_job_for_user(job, cv_text, ai_client, locations, visa_status)
-                    if scored_job is None:
-                        continue
-                    gaps = _analyse_gaps_for_user(scored_job, cv_text, ai_client)
-                    save_user_job({
-                        "clerk_user_id": clerk_id,
-                        "url": url,
-                        "score": scored_job.get("score", 0),
-                        "reason": scored_job.get("reason", ""),
-                        "sponsor_likelihood": scored_job.get("sponsor_likelihood", "Unknown"),
-                        "hard_gaps": gaps.get("hard_gaps", []),
-                        "soft_gaps": gaps.get("soft_gaps", []),
-                        "hidden_strengths": gaps.get("hidden_strengths", []),
-                        "created_at": datetime.now(timezone.utc),
-                    })
-                    user_jobs_written += 1
-
-        print(f"      → {jobs_saved} job(s) saved, {user_jobs_written} user_job record(s) written")
-    except Exception as exc:
-        logger.error("MongoDB write failed: %s", exc)
-
-    # ── 8. Email ──────────────────────────────────────────────────────────────
-    print("\n[8/8] Sending email...")
-    try:
-        if os.environ.get("WEBAPP_URL"):
-            _send_notification_email(analysed)
-        else:
-            send_digest(analysed)
-        print("      → Email sent successfully")
-    except Exception as exc:
-        logger.error("Email send failed: %s", exc)
-
-    # ── Mark all new jobs as seen ─────────────────────────────────────────────
+    # ── Mark seen jobs ────────────────────────────────────────────────────────
     try:
         mark_seen(new_jobs)
     except Exception as exc:
         logger.error("Failed to update seen_jobs.json: %s", exc)
 
-    print("\n✓ GetHired pipeline complete.\n")
+    print("\n✓ NullToOffer pipeline complete.\n")
 
 
 if __name__ == "__main__":

@@ -1,16 +1,23 @@
 import os
+import threading
 from datetime import datetime, timezone
 from pymongo import MongoClient
 
 _client = None
 _db = None
+_lock = threading.Lock()
 
 
 def _get_db():
     global _client, _db
-    if _db is None:
-        _client = MongoClient(os.environ["MONGODB_URI"])
-        _db = _client["nulltooffer"]
+    with _lock:
+        if _db is None:
+            _client = MongoClient(
+                os.environ["MONGODB_URI"],
+                serverSelectionTimeoutMS=5000,
+            )
+            _client.admin.command("ping")
+            _db = _client["nulltooffer"]
     return _db
 
 
