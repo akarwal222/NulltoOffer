@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import smtplib
+import time
 import requests
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -194,6 +195,7 @@ def score_jobs_for_user(
         result = _score_job_for_user(job, cv_text, client, locations, visa_status)
         if result is not None:
             scored.append(result)
+        time.sleep(0.5)
     return scored
 
 
@@ -204,6 +206,7 @@ def analyse_gaps_for_user(jobs: list[dict], cv_text: str) -> list[dict]:
     for job in jobs:
         gaps = _analyse_gap_for_job(job, cv_text, client)
         results.append({**job, "gap_analysis": gaps})
+        time.sleep(0.5)
     return results
 
 
@@ -360,6 +363,7 @@ def send_notification_email(jobs: list[dict], email: str, user: dict) -> None:
 
 def process_user(user: dict, all_jobs: list[dict]) -> int:
     clerk_user_id = user["clerk_user_id"]
+    short_id = f"{clerk_user_id[:8]}..."
     cv_text = user.get("cv_text", "")
     target_roles = user.get("target_roles", [])
     locations = user.get("locations", [])
@@ -375,13 +379,21 @@ def process_user(user: dict, all_jobs: list[dict]) -> int:
     analysed_jobs = analyse_gaps_for_user(scored_jobs, cv_text)
     write_user_jobs_to_mongo(analysed_jobs, clerk_user_id)
 
+    n = len(analysed_jobs)
+
+    if n == 0:
+        logger.info("→ User %s: 0 matches — no jobs above threshold", short_id)
+        return 0
+
     email = get_user_email(clerk_user_id)
     if email:
         send_notification_email(analysed_jobs, email, user)
+        logger.info("→ User %s: %d match%s written, email sent to %s", short_id, n, "es" if n != 1 else "", email)
     else:
         logger.warning("Could not retrieve email for user %s — skipping notification", clerk_user_id)
+        logger.info("→ User %s: %d match%s written, no email sent", short_id, n, "es" if n != 1 else "")
 
-    return len(analysed_jobs)
+    return n
 
 
 def main():
@@ -457,17 +469,17 @@ def main():
     skipped_users: list[str] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_to_user = {
-            executor.submit(process_user, user, new_jobs): user
-            for user in valid_users
-        }
+        future_to_user: dict = {}
+        for i, user in enumerate(valid_users):
+            time.sleep(i * 3)
+            future = executor.submit(process_user, user, new_jobs)
+            future_to_user[future] = user
         for future in concurrent.futures.as_completed(future_to_user):
             user = future_to_user[future]
             clerk_id = user.get("clerk_user_id", "unknown")
             try:
                 count = future.result()
                 total_jobs_written += count
-                logger.info("User %s: %d job(s) matched and written", clerk_id, count)
             except Exception as exc:
                 logger.error("Processing failed for user %s: %s", clerk_id, exc)
                 skipped_users.append(clerk_id)

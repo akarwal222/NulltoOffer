@@ -31,6 +31,7 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
           WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
         run: python main.py
 
