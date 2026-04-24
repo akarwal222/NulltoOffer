@@ -16,14 +16,30 @@ MODEL = "claude-haiku-4-5-20251001"
 
 def _actor_url(actor_id: str) -> str:
     return f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
-SEARCH_QUERIES = [
-    "hiring ML engineer London",
-    "hiring AI engineer London",
-    "looking for NLP engineer",
-    "we're hiring machine learning London",
-    "data scientist London hiring",
-]
+
 MAX_RESULTS = 20
+
+_CITY_KEYWORD_MAP = [
+    ("New York", "New York"),
+    ("San Francisco", "San Francisco"),
+    ("Manchester", "Manchester"),
+    ("Edinburgh", "Edinburgh"),
+    ("Delhi", "Delhi"),
+    ("Mumbai", "Mumbai"),
+    ("Bangalore", "Bangalore"),
+    ("Hyderabad", "Hyderabad"),
+    ("Remote", "remote"),
+    ("London", "London"),
+]
+
+
+def _term_to_query(term: str) -> str:
+    for city, keyword in _CITY_KEYWORD_MAP:
+        if city.lower() in term.lower():
+            role = re.sub(r'\b' + re.escape(city) + r'\b', '', term, flags=re.IGNORECASE)
+            role = re.sub(r'\s+', ' ', role).strip()
+            return f"hiring {role} {keyword}"
+    return f"hiring {term} London"
 
 _NON_UK_LOCATIONS = [
     "egypt", "uae", "dubai", "india", "pakistan", "nigeria",
@@ -127,15 +143,15 @@ def _infer_title(post_text: str) -> str:
     return "ML/AI Role"
 
 
-def _build_search_urls() -> list[str]:
+def _build_search_urls(search_queries: list[str]) -> list[str]:
     base = "https://www.linkedin.com/search/results/content/"
-    return [f"{base}?keywords={urllib.parse.quote(q)}" for q in SEARCH_QUERIES]
+    return [f"{base}?keywords={urllib.parse.quote(_term_to_query(q))}" for q in search_queries]
 
 
-def _start_actor_run(token: str) -> str:
+def _start_actor_run(token: str, search_queries: list[str]) -> str:
     url = _actor_url(ACTOR_ID)
     payload = {
-        "urls": _build_search_urls(),
+        "urls": _build_search_urls(search_queries),
         "limitPerSource": MAX_RESULTS,
         "deepScrape": True,
     }
@@ -333,12 +349,12 @@ def _normalise(item: dict) -> dict | None:
     }
 
 
-def scrape_linkedin_posts() -> list[dict]:
+def scrape_linkedin_posts(search_queries: list[str]) -> list[dict]:
     token = os.environ["APIFY_API_TOKEN"]
     logger.info("Starting LinkedIn posts scraper (actor: %s)", ACTOR_ID)
 
     try:
-        run_id = _start_actor_run(token)
+        run_id = _start_actor_run(token, search_queries)
         logger.info("Actor run started: %s — waiting for completion...", run_id)
 
         _wait_for_run(token, run_id)

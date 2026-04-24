@@ -437,7 +437,7 @@ def main():
     # ── Step 2: Scrape once for all combined terms ────────────────────────────
     print("\n[Step 2] Scraping LinkedIn job listings...")
     try:
-        listings = scrape_jobs()
+        listings = scrape_jobs(search_terms)
         print(f"         → {len(listings)} listings retrieved")
     except Exception as exc:
         logger.error("LinkedIn jobs scraper failed: %s", exc)
@@ -445,7 +445,7 @@ def main():
 
     print("\n[Step 3] Scraping LinkedIn hiring posts...")
     try:
-        posts = scrape_linkedin_posts()
+        posts = scrape_linkedin_posts(search_terms)
         print(f"         → {len(posts)} posts retrieved")
     except Exception as exc:
         logger.error("LinkedIn posts scraper failed: %s", exc)

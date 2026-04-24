@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import urllib.parse
@@ -9,39 +10,53 @@ logger = logging.getLogger(__name__)
 APIFY_BASE = "https://api.apify.com/v2"
 # Future upgrade: curious_coder/linkedin-jobs-search-scraper — also returns recruiter and company contact details, useful for Phase 2 networking feature
 ACTOR_ID = "curious_coder/linkedin-jobs-scraper"
-SEARCH_TERMS = [
-    "ML Engineer",
-    "AI Engineer",
-    "NLP Engineer",
-    "Applied AI Engineer",
-    "Machine Learning Engineer",
-    "LLM Engineer",
-    "Data Scientist",
-]
 COUNT_PER_URL = 30
+
+_CITY_LOCATION_MAP = [
+    ("New York", "New York, United States"),
+    ("San Francisco", "San Francisco, United States"),
+    ("Manchester", "Manchester, United Kingdom"),
+    ("Edinburgh", "Edinburgh, United Kingdom"),
+    ("Delhi", "Delhi, India"),
+    ("Mumbai", "Mumbai, India"),
+    ("Bangalore", "Bangalore, India"),
+    ("Hyderabad", "Hyderabad, India"),
+    ("Remote", "Worldwide"),
+    ("London", "London, United Kingdom"),
+]
+
+
+def _split_term(term: str) -> tuple[str, str]:
+    for city, location in _CITY_LOCATION_MAP:
+        if city.lower() in term.lower():
+            keywords = re.sub(r'\b' + re.escape(city) + r'\b', '', term, flags=re.IGNORECASE)
+            keywords = re.sub(r'\s+', ' ', keywords).strip()
+            return keywords, location
+    return term, "London, United Kingdom"
 
 
 def _actor_url(actor_id: str) -> str:
     return f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
 
 
-def _build_search_urls() -> list[str]:
+def _build_search_urls(search_terms: list[str]) -> list[str]:
     base = "https://www.linkedin.com/jobs/search/"
-    return [
-        base + "?" + urllib.parse.urlencode({
-            "keywords": term,
-            "location": "London, United Kingdom",
+    urls = []
+    for term in search_terms:
+        keywords, location = _split_term(term)
+        urls.append(base + "?" + urllib.parse.urlencode({
+            "keywords": keywords,
+            "location": location,
             "position": 1,
             "pageNum": 0,
-        })
-        for term in SEARCH_TERMS
-    ]
+        }))
+    return urls
 
 
-def _start_actor_run(token: str) -> str:
+def _start_actor_run(token: str, search_terms: list[str]) -> str:
     url = _actor_url(ACTOR_ID)
     payload = {
-        "urls": _build_search_urls(),
+        "urls": _build_search_urls(search_terms),
         "count": COUNT_PER_URL,
         "scrapeCompany": True,
         "splitByLocation": False,
@@ -114,11 +129,11 @@ def _normalise(item: dict) -> dict:
     }
 
 
-def scrape_jobs() -> list[dict]:
+def scrape_jobs(search_terms: list[str]) -> list[dict]:
     token = os.environ["APIFY_API_TOKEN"]
     logger.info("Starting LinkedIn jobs scraper (actor: %s)", ACTOR_ID)
 
-    run_id = _start_actor_run(token)
+    run_id = _start_actor_run(token, search_terms)
     logger.info("Actor run started: %s — waiting for completion...", run_id)
 
     _wait_for_run(token, run_id)
