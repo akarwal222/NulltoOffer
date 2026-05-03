@@ -146,6 +146,23 @@ def score_jobs(
     location_rules = _build_location_rules(locations or [])
     sponsor_rules, sponsor_hint = _build_sponsor_rules(visa_status)
 
+    experience_rules = (
+        "EXPERIENCE LEVEL MATCHING:\n"
+        "Before scoring, estimate the candidate's total years of professional experience from their CV.\n"
+        "Then check if the job posting mentions required years of experience explicitly.\n\n"
+        "If the job explicitly requires fewer years than the candidate has "
+        "(e.g. 'graduate role', '0-2 years', 'entry level', 'junior'):\n"
+        "- Reduce score by 2 points\n"
+        "- Add to reason: 'Note: Role targets less experienced candidates — candidate is overqualified'\n\n"
+        "If the job explicitly requires more years than the candidate has "
+        "(e.g. '10+ years', 'senior level 8+ years'):\n"
+        "- Reduce score by 2 points\n"
+        "- Add to reason: 'Note: Role requires more experience than candidate currently has'\n\n"
+        "If no experience level is mentioned in the job posting:\n"
+        "- Do not penalise — score on technical fit only\n\n"
+        "Apply this AFTER calculating technical fit score, as an adjustment."
+    )
+
     system_prompt = (
         "You are a recruitment analyst. You will be given a candidate's CV and a job posting. "
         "Score the fit from 1–10 and assess visa sponsorship likelihood.\n\n"
@@ -154,6 +171,7 @@ def score_jobs(
         "they are an explicit target for this candidate.\n\n"
         f"{location_rules}\n\n"
         f"{sponsor_rules}\n\n"
+        f"{experience_rules}\n\n"
         f"CANDIDATE CV:\n{cv_text}"
     )
 

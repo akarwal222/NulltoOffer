@@ -21,6 +21,10 @@ def _get_db():
     return _db
 
 
+def get_db():
+    return _get_db()
+
+
 def get_all_users() -> list[dict]:
     return list(_get_db()["users"].find({}, {"_id": 0}))
 

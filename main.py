@@ -1,9 +1,8 @@
-import concurrent.futures
+import asyncio
 import logging
 import os
 import sys
 import smtplib
-import time
 import requests
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -58,7 +57,7 @@ def _build_search_terms(users: list[dict]) -> list[str]:
     return sorted_terms[:20]
 
 
-def _score_job_for_user(
+async def _score_job_for_user(
     job: dict,
     cv_text: str,
     client,
@@ -101,7 +100,7 @@ def _score_job_for_user(
     )
 
     try:
-        message = client.messages.create(
+        message = await client.messages.create(
             model=_MODEL,
             max_tokens=1000,
             system=system_prompt,
@@ -115,7 +114,7 @@ def _score_job_for_user(
     return None
 
 
-def _analyse_gap_for_job(job: dict, cv_text: str, client) -> dict:
+async def _analyse_gap_for_job(job: dict, cv_text: str, client) -> dict:
     system_prompt = (
         "You are a career coach performing CV gap analysis. "
         "Compare a job description against the candidate's CV and identify gaps and strengths.\n\n"
@@ -132,7 +131,7 @@ def _analyse_gap_for_job(job: dict, cv_text: str, client) -> dict:
 
     gaps = {"hard_gaps": [], "soft_gaps": [], "hidden_strengths": []}
     try:
-        message = client.messages.create(
+        message = await client.messages.create(
             model=_MODEL,
             max_tokens=1500,
             system=system_prompt,
@@ -181,7 +180,7 @@ def filter_jobs_for_user(jobs: list[dict], target_roles: list[str]) -> list[dict
     return result
 
 
-def score_jobs_for_user(
+async def score_jobs_for_user(
     jobs: list[dict],
     cv_text: str,
     locations: list[str],
@@ -189,24 +188,24 @@ def score_jobs_for_user(
     requires_sponsorship: bool,
 ) -> list[dict]:
     import anthropic
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     scored = []
     for job in jobs:
-        result = _score_job_for_user(job, cv_text, client, locations, visa_status)
+        result = await _score_job_for_user(job, cv_text, client, locations, visa_status)
         if result is not None:
             scored.append(result)
-        time.sleep(0.5)
+        await asyncio.sleep(0.3)
     return scored
 
 
-def analyse_gaps_for_user(jobs: list[dict], cv_text: str) -> list[dict]:
+async def analyse_gaps_for_user(jobs: list[dict], cv_text: str) -> list[dict]:
     import anthropic
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     results = []
     for job in jobs:
-        gaps = _analyse_gap_for_job(job, cv_text, client)
+        gaps = await _analyse_gap_for_job(job, cv_text, client)
         results.append({**job, "gap_analysis": gaps})
-        time.sleep(0.5)
+        await asyncio.sleep(0.3)
     return results
 
 
@@ -361,7 +360,9 @@ def send_notification_email(jobs: list[dict], email: str, user: dict) -> None:
     logger.info("Notification email sent to %s (%d matches)", email, n)
 
 
-def process_user(user: dict, all_jobs: list[dict]) -> int:
+async def process_user(user: dict, all_jobs: list[dict]) -> int:
+    from database import user_job_exists
+
     clerk_user_id = user["clerk_user_id"]
     short_id = f"{clerk_user_id[:8]}..."
     cv_text = user.get("cv_text", "")
@@ -375,8 +376,15 @@ def process_user(user: dict, all_jobs: list[dict]) -> int:
         return 0
 
     relevant_jobs = filter_jobs_for_user(all_jobs, target_roles)
-    scored_jobs = score_jobs_for_user(relevant_jobs, cv_text, locations, visa_status, requires_sponsorship)
-    analysed_jobs = analyse_gaps_for_user(scored_jobs, cv_text)
+
+    # Per-user deduplication: skip jobs this user has already seen
+    jobs_to_score = [
+        j for j in relevant_jobs
+        if j.get("url") and not user_job_exists(clerk_user_id, j["url"])
+    ]
+
+    scored_jobs = await score_jobs_for_user(jobs_to_score, cv_text, locations, visa_status, requires_sponsorship)
+    analysed_jobs = await analyse_gaps_for_user(scored_jobs, cv_text)
     write_user_jobs_to_mongo(analysed_jobs, clerk_user_id)
 
     n = len(analysed_jobs)
@@ -385,9 +393,9 @@ def process_user(user: dict, all_jobs: list[dict]) -> int:
         logger.info("→ User %s: 0 matches — no jobs above threshold", short_id)
         return 0
 
-    email = get_user_email(clerk_user_id)
+    email = await asyncio.to_thread(get_user_email, clerk_user_id)
     if email:
-        send_notification_email(analysed_jobs, email, user)
+        await asyncio.to_thread(send_notification_email, analysed_jobs, email, user)
         logger.info("→ User %s: %d match%s written, email sent to %s", short_id, n, "es" if n != 1 else "", email)
     else:
         logger.warning("Could not retrieve email for user %s — skipping notification", clerk_user_id)
@@ -396,10 +404,9 @@ def process_user(user: dict, all_jobs: list[dict]) -> int:
     return n
 
 
-def main():
+async def main():
     from scrapers.jobs_scraper import scrape_jobs
     from scrapers.linkedin_posts_scraper import scrape_linkedin_posts
-    from core.deduplicator import deduplicate, mark_seen
     from database import get_all_users
 
     # ── Step 0: Load all users from MongoDB ──────────────────────────────────
@@ -437,7 +444,7 @@ def main():
     # ── Step 2: Scrape once for all combined terms ────────────────────────────
     print("\n[Step 2] Scraping LinkedIn job listings...")
     try:
-        listings = scrape_jobs(search_terms)
+        listings = await asyncio.to_thread(scrape_jobs, search_terms)
         print(f"         → {len(listings)} listings retrieved")
     except Exception as exc:
         logger.error("LinkedIn jobs scraper failed: %s", exc)
@@ -445,7 +452,7 @@ def main():
 
     print("\n[Step 3] Scraping LinkedIn hiring posts...")
     try:
-        posts = scrape_linkedin_posts(search_terms)
+        posts = await asyncio.to_thread(scrape_linkedin_posts, search_terms)
         print(f"         → {len(posts)} posts retrieved")
     except Exception as exc:
         logger.error("LinkedIn posts scraper failed: %s", exc)
@@ -454,52 +461,40 @@ def main():
     all_jobs = listings + posts
     print(f"         → {len(all_jobs)} total jobs combined")
 
-    # ── Step 3: Deduplicate ───────────────────────────────────────────────────
-    print("\n[Step 4] Deduplicating against seen jobs...")
-    try:
-        new_jobs = deduplicate(all_jobs)
-        print(f"         → {len(new_jobs)} new (unseen) jobs")
-    except Exception as exc:
-        logger.error("Deduplication failed: %s", exc)
-        new_jobs = all_jobs
-
     # ── Steps 4-7: Per-user parallel processing ───────────────────────────────
-    print(f"\n[Steps 5-8] Processing {len(valid_users)} user(s) in parallel (max 3 workers)...")
+    print(f"\n[Steps 4-7] Processing {len(valid_users)} user(s) in parallel (max 3 concurrent)...")
+
+    semaphore = asyncio.Semaphore(3)
+
+    async def process_with_semaphore(user: dict) -> int:
+        async with semaphore:
+            return await process_user(user, all_jobs)
+
+    results = await asyncio.gather(
+        *[process_with_semaphore(u) for u in valid_users],
+        return_exceptions=True,
+    )
+
+    # ── Summary log ──────────────────────────────────────────────────────────
     total_jobs_written = 0
     skipped_users: list[str] = []
+    for user, result in zip(valid_users, results):
+        clerk_id = user.get("clerk_user_id", "unknown")
+        if isinstance(result, Exception):
+            logger.error("Processing failed for user %s: %s", clerk_id, result)
+            skipped_users.append(clerk_id)
+        else:
+            total_jobs_written += result
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        future_to_user: dict = {}
-        for i, user in enumerate(valid_users):
-            time.sleep(i * 3)
-            future = executor.submit(process_user, user, new_jobs)
-            future_to_user[future] = user
-        for future in concurrent.futures.as_completed(future_to_user):
-            user = future_to_user[future]
-            clerk_id = user.get("clerk_user_id", "unknown")
-            try:
-                count = future.result()
-                total_jobs_written += count
-            except Exception as exc:
-                logger.error("Processing failed for user %s: %s", clerk_id, exc)
-                skipped_users.append(clerk_id)
-
-    # ── Step 8: Summary log ───────────────────────────────────────────────────
     processed = len(valid_users) - len(skipped_users)
     print(f"\n[Summary]")
-    print(f"  Users processed:   {processed}/{len(valid_users)}")
+    print(f"  Users processed:    {processed}/{len(valid_users)}")
     print(f"  Total jobs written: {total_jobs_written}")
     if skipped_users:
-        print(f"  Skipped (errors):  {', '.join(skipped_users)}")
-
-    # ── Mark seen jobs ────────────────────────────────────────────────────────
-    try:
-        mark_seen(new_jobs)
-    except Exception as exc:
-        logger.error("Failed to update seen_jobs.json: %s", exc)
+        print(f"  Skipped (errors):   {', '.join(skipped_users)}")
 
     print("\n✓ NullToOffer pipeline complete.\n")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
