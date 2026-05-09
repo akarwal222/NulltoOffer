@@ -34,14 +34,9 @@ def job_exists(url: str) -> bool:
 
 
 def save_job(job: dict) -> None:
-    fields = {
-        k: job.get(k)
-        for k in (
-            "title", "company", "location", "salary", "description",
-            "url", "source", "type", "poster_name", "poster_title", "scraped_at",
-        )
-    }
-    _get_db()["jobs"].update_one({"url": job["url"]}, {"$set": fields}, upsert=True)
+    job_data = {k: v for k, v in job.items() if k != "_id"}
+    job_data["scraped_at"] = datetime.utcnow().isoformat()
+    _get_db()["jobs"].update_one({"url": job["url"]}, {"$set": job_data}, upsert=True)
 
 
 def save_user_job(user_job: dict) -> None:
