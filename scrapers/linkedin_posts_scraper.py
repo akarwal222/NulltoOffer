@@ -4,6 +4,7 @@ import re
 import time
 import logging
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 import anthropic
 import requests
 
@@ -12,6 +13,26 @@ logger = logging.getLogger(__name__)
 APIFY_BASE = "https://api.apify.com/v2"
 ACTOR_ID = "supreme_coder/linkedin-post"
 MODEL = "claude-haiku-4-5-20251001"
+
+_POST_DATE_FIELDS = ("postedAt", "publishedAt", "timestamp", "date", "createdAt", "scraped_at")
+
+
+def _is_recent(date_str: str, max_days: int = 60) -> bool:
+    if not date_str:
+        return True
+    try:
+        dt = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) - dt <= timedelta(days=max_days)
+    except Exception:
+        return True
+
+
+def _get_post_date(item: dict) -> str:
+    for field in _POST_DATE_FIELDS:
+        val = item.get(field)
+        if val and isinstance(val, str):
+            return val
+    return ""
 
 
 def _actor_url(actor_id: str) -> str:
@@ -360,10 +381,21 @@ def scrape_linkedin_posts(search_queries: list[str]) -> list[dict]:
         _wait_for_run(token, run_id)
         raw = _fetch_results(token, run_id)
 
+        candidates = [item for item in raw if item.get("url") or item.get("postUrl")]
+        original_count = len(candidates)
+
+        if any(_get_post_date(item) for item in candidates):
+            candidates = [item for item in candidates if _is_recent(_get_post_date(item))]
+            logger.info(
+                "Posts after age filter: %d (removed %d stale)",
+                len(candidates),
+                original_count - len(candidates),
+            )
+        else:
+            logger.info("Posts age filter skipped — no date field found in post data")
+
         posts = []
-        for item in raw:
-            if not (item.get("url") or item.get("postUrl")):
-                continue
+        for item in candidates:
             normalised = _normalise(item)
             if normalised is not None:
                 posts.append(normalised)

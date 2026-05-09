@@ -3,6 +3,7 @@ import re
 import time
 import logging
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 import requests
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,16 @@ _CITY_LOCATION_MAP = [
     ("Remote", "Worldwide"),
     ("London", "London, United Kingdom"),
 ]
+
+
+def _is_recent(posted_at: str, max_days: int = 60) -> bool:
+    if not posted_at:
+        return True
+    try:
+        dt = datetime.fromisoformat(posted_at.replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) - dt <= timedelta(days=max_days)
+    except Exception:
+        return True
 
 
 def _split_term(term: str) -> tuple[str, str]:
@@ -152,5 +163,8 @@ def scrape_jobs(search_terms: list[str]) -> list[dict]:
     raw = _fetch_results(token, run_id)
 
     jobs = [_normalise(item) for item in raw if item.get("link")]
+    original_count = len(jobs)
+    jobs = [j for j in jobs if _is_recent(j.get("posted_at", ""))]
+    logger.info("Jobs after age filter: %d (removed %d stale)", len(jobs), original_count - len(jobs))
     logger.info("Jobs scraper: %d listings retrieved", len(jobs))
     return jobs

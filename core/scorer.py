@@ -135,18 +135,8 @@ def _parse_response(text: str) -> dict:
     return result
 
 
-def score_jobs(
-    jobs: list[dict],
-    locations: list[str] | None = None,
-    visa_status: str = "",
-) -> list[dict]:
-    cv_text = _load_cv()
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-    location_rules = _build_location_rules(locations or [])
-    sponsor_rules, sponsor_hint = _build_sponsor_rules(visa_status)
-
-    experience_rules = (
+def _build_experience_rules() -> str:
+    return (
         "EXPERIENCE LEVEL MATCHING:\n"
         "Before scoring, estimate the candidate's total years of professional experience from their CV.\n"
         "Then check if the job posting mentions required years of experience explicitly.\n\n"
@@ -162,6 +152,19 @@ def score_jobs(
         "- Do not penalise — score on technical fit only\n\n"
         "Apply this AFTER calculating technical fit score, as an adjustment."
     )
+
+
+def score_jobs(
+    jobs: list[dict],
+    locations: list[str] | None = None,
+    visa_status: str = "",
+) -> list[dict]:
+    cv_text = _load_cv()
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    location_rules = _build_location_rules(locations or [])
+    sponsor_rules, sponsor_hint = _build_sponsor_rules(visa_status)
+    experience_rules = _build_experience_rules()
 
     system_prompt = (
         "You are a recruitment analyst. You will be given a candidate's CV and a job posting. "

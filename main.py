@@ -64,7 +64,7 @@ async def _score_job_for_user(
     locations: list[str] | None = None,
     visa_status: str = "",
 ) -> dict | None:
-    from core.scorer import _build_location_rules, _build_sponsor_rules, _parse_response, _is_commentary_post
+    from core.scorer import _build_location_rules, _build_sponsor_rules, _build_experience_rules, _parse_response, _is_commentary_post
 
     if _is_commentary_post(job):
         return None
@@ -84,11 +84,13 @@ async def _score_job_for_user(
 
     location_rules = _build_location_rules(locations or [])
     sponsor_rules, sponsor_hint = _build_sponsor_rules(visa_status)
+    experience_rules = _build_experience_rules()
 
     system_prompt = (
         "You are a recruitment analyst. Score job fit from 1–10 and assess visa sponsorship likelihood.\n\n"
         f"{location_rules}\n\n"
         f"{sponsor_rules}\n\n"
+        f"{experience_rules}\n\n"
         f"CANDIDATE CV:\n{cv_text}"
     )
     user_prompt = (
