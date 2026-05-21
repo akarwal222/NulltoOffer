@@ -15,6 +15,7 @@ def _get_db():
             _client = MongoClient(
                 os.environ["MONGODB_URI"],
                 serverSelectionTimeoutMS=5000,
+                tls=True,
             )
             _client.admin.command("ping")
             _db = _client["nulltooffer"]
