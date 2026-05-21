@@ -27,7 +27,7 @@ _CITY_LOCATION_MAP = [
 ]
 
 
-def _is_recent(posted_at: str, max_days: int = 60) -> bool:
+def _is_recent(posted_at: str, max_days: int = 30) -> bool:
     if not posted_at:
         return True
     try:

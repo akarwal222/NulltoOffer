@@ -28,11 +28,13 @@ jobs:
         env:
           APIFY_API_TOKEN: ${{ secrets.APIFY_API_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
           WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+          SENTRY_DSN_PIPELINE: ${{ secrets.SENTRY_DSN_PIPELINE }}
+          ENVIRONMENT: ${{ secrets.ENVIRONMENT }}
         run: python main.py
 
       - name: Persist seen_jobs.json

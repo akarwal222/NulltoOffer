@@ -17,7 +17,7 @@ MODEL = "claude-haiku-4-5-20251001"
 _POST_DATE_FIELDS = ("postedAt", "publishedAt", "timestamp", "date", "createdAt", "scraped_at")
 
 
-def _is_recent(date_str: str, max_days: int = 60) -> bool:
+def _is_recent(date_str: str, max_days: int = 30) -> bool:
     if not date_str:
         return True
     try:

@@ -1,15 +1,12 @@
 import os
 import re
-import smtplib
+import resend
 import logging
 from datetime import date
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+
+resend.api_key = os.getenv("RESEND_API_KEY")
 
 logger = logging.getLogger(__name__)
-
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
 
 _CSS = """
   body { margin: 0; padding: 0; background: #f3f4f6; font-family: Arial, sans-serif; color: #1a1a2e; }
@@ -197,8 +194,7 @@ def _format_job_text(job: dict) -> str:
 
 
 def send_digest(jobs: list[dict]) -> None:
-    gmail_address = os.environ["GMAIL_ADDRESS"]
-    gmail_password = os.environ["GMAIL_APP_PASSWORD"]
+    recipient_email = os.getenv("FROM_EMAIL", "hello@nulltooffer.app")
     today = date.today().strftime("%Y-%m-%d")
 
     sorted_jobs = sorted(jobs, key=lambda j: j.get("score", 0), reverse=True)
@@ -206,26 +202,22 @@ def send_digest(jobs: list[dict]) -> None:
 
     subject = f"🎯 Job Digest — {today} — {n} new matches"
 
-    html_body = _build_html(sorted_jobs, today)
+    html_content = _build_html(sorted_jobs, today)
 
     if n == 0:
-        plain_body = f"NullToOffer Job Digest — {today}\n\nNo new matches today. The pipeline ran successfully."
+        plain_content = f"NullToOffer Job Digest — {today}\n\nNo new matches today. The pipeline ran successfully."
     else:
         separator = "\n" + "-" * 60 + "\n"
-        plain_body = f"NullToOffer Job Digest — {today} — {n} new matches\n"
-        plain_body += separator + separator.join(_format_job_text(j) for j in sorted_jobs)
+        plain_content = f"NullToOffer Job Digest — {today} — {n} new matches\n"
+        plain_content += separator + separator.join(_format_job_text(j) for j in sorted_jobs)
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = gmail_address
-    msg["To"] = gmail_address
-    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    params = {
+        "from": f"NullToOffer <{recipient_email}>",
+        "to": [recipient_email],
+        "subject": subject,
+        "html": html_content,
+        "text": plain_content,
+    }
+    resend.Emails.send(params)
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(gmail_address, gmail_password)
-        server.sendmail(gmail_address, gmail_address, msg.as_string())
-
-    logger.info("Email digest sent to %s (%d jobs)", gmail_address, n)
+    logger.info("Email digest sent to %s (%d jobs)", recipient_email, n)

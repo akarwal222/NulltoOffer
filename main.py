@@ -2,14 +2,22 @@ import asyncio
 import logging
 import os
 import sys
-import smtplib
+import resend
 import requests
+import sentry_sdk
 from datetime import datetime, timezone
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from dotenv import load_dotenv
 
 load_dotenv()
+
+resend.api_key = os.getenv("RESEND_API_KEY")
+
+sentry_sdk.init(
+    dsn=os.getenv("SENTRY_DSN_PIPELINE"),
+    traces_sample_rate=0.1,
+    environment=os.getenv("ENVIRONMENT", "production"),
+    send_default_pii=False,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -256,8 +264,6 @@ def send_notification_email(jobs: list[dict], email: str, user: dict) -> None:
     if not jobs:
         return
 
-    gmail_address = os.environ["GMAIL_ADDRESS"]
-    gmail_password = os.environ["GMAIL_APP_PASSWORD"]
     webapp_url = os.environ.get("WEBAPP_URL", "https://nulltooffer.app")
     dashboard_url = f"{webapp_url}/dashboard"
     today = datetime.now(timezone.utc).strftime("%B %d, %Y")
@@ -346,24 +352,22 @@ def send_notification_email(jobs: list[dict], email: str, user: dict) -> None:
         f"View all {n} match{'es' if n != 1 else ''} at {dashboard_url}"
     )
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = gmail_address
-    msg["To"] = email
-    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
-
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(gmail_address, gmail_password)
-        server.sendmail(gmail_address, email, msg.as_string())
+    params = {
+        "from": f"NullToOffer <{os.getenv('FROM_EMAIL', 'hello@nulltooffer.app')}>",
+        "to": [email],
+        "subject": subject,
+        "html": html_body,
+        "text": plain_body,
+    }
+    resend.Emails.send(params)
 
     logger.info("Notification email sent to %s (%d matches)", email, n)
 
 
-async def process_user(user: dict, all_jobs: list[dict]) -> int:
+async def process_user(user: dict) -> int:
     from database import user_job_exists
+    from scrapers.jobs_scraper import scrape_jobs
+    from scrapers.linkedin_posts_scraper import scrape_linkedin_posts
 
     clerk_user_id = user["clerk_user_id"]
     short_id = f"{clerk_user_id[:8]}..."
@@ -376,6 +380,20 @@ async def process_user(user: dict, all_jobs: list[dict]) -> int:
     if not cv_text:
         logger.warning("User %s has no CV uploaded — skipping", clerk_user_id)
         return 0
+
+    user_search_terms = _build_search_terms([user])
+
+    preferred_sources = user.get("preferred_sources", ["linkedin_jobs", "linkedin_posts"])
+    listings = []
+    posts = []
+
+    if "linkedin_jobs" in preferred_sources:
+        listings = await asyncio.to_thread(scrape_jobs, user_search_terms)
+    if "linkedin_posts" in preferred_sources:
+        posts = await asyncio.to_thread(scrape_linkedin_posts, user_search_terms)
+
+    all_jobs = listings + posts
+    logger.info("User %s: sources %s → %d jobs scraped", clerk_user_id[:8], preferred_sources, len(all_jobs))
 
     relevant_jobs = filter_jobs_for_user(all_jobs, target_roles)
 
@@ -407,95 +425,70 @@ async def process_user(user: dict, all_jobs: list[dict]) -> int:
 
 
 async def main():
-    from scrapers.jobs_scraper import scrape_jobs
-    from scrapers.linkedin_posts_scraper import scrape_linkedin_posts
-    from database import get_all_users
+    with sentry_sdk.start_transaction(op="pipeline", name="NullToOffer Daily Scan"):
+        from database import get_all_users
 
-    # ── Step 0: Load all users from MongoDB ──────────────────────────────────
-    print("\n[Step 0] Loading users from MongoDB...")
-    try:
-        users = get_all_users()
-    except Exception as exc:
-        logger.error("MongoDB connection failed: %s", exc)
-        sys.exit(1)
+        # ── Step 0: Load all users from MongoDB ──────────────────────────────────
+        print("\n[Step 0] Loading users from MongoDB...")
+        try:
+            users = get_all_users()
+        except Exception as exc:
+            logger.error("MongoDB connection failed: %s", exc)
+            sys.exit(1)
 
-    if not users:
-        logger.info("No registered users found — skipping pipeline run")
-        sys.exit(0)
+        if not users:
+            logger.info("No registered users found — skipping pipeline run")
+            sys.exit(0)
 
-    print(f"         → {len(users)} user(s) loaded")
+        print(f"         → {len(users)} user(s) loaded")
 
-    # ── Step 1: Build combined search terms ──────────────────────────────────
-    print("\n[Step 1] Building combined search terms from user preferences...")
-    valid_users: list[dict] = []
-    for user in users:
-        clerk_id = user.get("clerk_user_id", "unknown")
-        if not user.get("target_roles") or not user.get("locations"):
-            logger.warning("User %s has incomplete preferences — skipping.", clerk_id)
-        else:
-            valid_users.append(user)
+        # ── Step 1: Build combined search terms ──────────────────────────────────
+        print("\n[Step 1] Building combined search terms from user preferences...")
+        valid_users: list[dict] = []
+        for user in users:
+            clerk_id = user.get("clerk_user_id", "unknown")
+            if not user.get("target_roles") or not user.get("locations"):
+                logger.warning("User %s has incomplete preferences — skipping.", clerk_id)
+            else:
+                valid_users.append(user)
 
-    if not valid_users:
-        logger.info("No users with complete preferences — skipping pipeline run")
-        sys.exit(0)
+        if not valid_users:
+            logger.info("No users with complete preferences — skipping pipeline run")
+            sys.exit(0)
 
-    search_terms = _build_search_terms(valid_users)
-    print(f"         → {len(search_terms)} combined search term(s)")
-    logger.info("Search terms: %s", search_terms)
+        # ── Steps 2-5: Per-user parallel processing ───────────────────────────────
+        print(f"\n[Steps 2-5] Processing {len(valid_users)} user(s) in parallel (max 3 concurrent)...")
 
-    # ── Step 2: Scrape once for all combined terms ────────────────────────────
-    print("\n[Step 2] Scraping LinkedIn job listings...")
-    try:
-        listings = await asyncio.to_thread(scrape_jobs, search_terms)
-        print(f"         → {len(listings)} listings retrieved")
-    except Exception as exc:
-        logger.error("LinkedIn jobs scraper failed: %s", exc)
-        listings = []
+        semaphore = asyncio.Semaphore(3)
 
-    print("\n[Step 3] Scraping LinkedIn hiring posts...")
-    try:
-        posts = await asyncio.to_thread(scrape_linkedin_posts, search_terms)
-        print(f"         → {len(posts)} posts retrieved")
-    except Exception as exc:
-        logger.error("LinkedIn posts scraper failed: %s", exc)
-        posts = []
+        async def process_with_semaphore(user: dict) -> int:
+            async with semaphore:
+                return await process_user(user)
 
-    all_jobs = listings + posts
-    print(f"         → {len(all_jobs)} total jobs combined")
+        results = await asyncio.gather(
+            *[process_with_semaphore(u) for u in valid_users],
+            return_exceptions=True,
+        )
 
-    # ── Steps 4-7: Per-user parallel processing ───────────────────────────────
-    print(f"\n[Steps 4-7] Processing {len(valid_users)} user(s) in parallel (max 3 concurrent)...")
+        # ── Summary log ──────────────────────────────────────────────────────────
+        total_jobs_written = 0
+        skipped_users: list[str] = []
+        for user, result in zip(valid_users, results):
+            clerk_id = user.get("clerk_user_id", "unknown")
+            if isinstance(result, Exception):
+                logger.error("Processing failed for user %s: %s", clerk_id, result)
+                skipped_users.append(clerk_id)
+            else:
+                total_jobs_written += result
 
-    semaphore = asyncio.Semaphore(3)
+        processed = len(valid_users) - len(skipped_users)
+        print(f"\n[Summary]")
+        print(f"  Users processed:    {processed}/{len(valid_users)}")
+        print(f"  Total jobs written: {total_jobs_written}")
+        if skipped_users:
+            print(f"  Skipped (errors):   {', '.join(skipped_users)}")
 
-    async def process_with_semaphore(user: dict) -> int:
-        async with semaphore:
-            return await process_user(user, all_jobs)
-
-    results = await asyncio.gather(
-        *[process_with_semaphore(u) for u in valid_users],
-        return_exceptions=True,
-    )
-
-    # ── Summary log ──────────────────────────────────────────────────────────
-    total_jobs_written = 0
-    skipped_users: list[str] = []
-    for user, result in zip(valid_users, results):
-        clerk_id = user.get("clerk_user_id", "unknown")
-        if isinstance(result, Exception):
-            logger.error("Processing failed for user %s: %s", clerk_id, result)
-            skipped_users.append(clerk_id)
-        else:
-            total_jobs_written += result
-
-    processed = len(valid_users) - len(skipped_users)
-    print(f"\n[Summary]")
-    print(f"  Users processed:    {processed}/{len(valid_users)}")
-    print(f"  Total jobs written: {total_jobs_written}")
-    if skipped_users:
-        print(f"  Skipped (errors):   {', '.join(skipped_users)}")
-
-    print("\n✓ NullToOffer pipeline complete.\n")
+        print("\n✓ NullToOffer pipeline complete.\n")
 
 
 if __name__ == "__main__":
