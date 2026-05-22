@@ -364,8 +364,75 @@ def send_notification_email(jobs: list[dict], email: str, user: dict) -> None:
     logger.info("Notification email sent to %s (%d matches)", email, n)
 
 
+# Synchronous alias for use with asyncio.to_thread()
+get_user_email_sync = get_user_email
+
+
+def send_waitlist_email(email: str) -> None:
+    webapp_url = os.environ.get("WEBAPP_URL", "https://nulltooffer.app")
+    site_label = webapp_url.removeprefix("https://").removeprefix("http://")
+
+    html_body = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;color:#1a1a2e;">
+<div style="max-width:600px;margin:0 auto;padding:32px 16px;">
+
+  <div style="text-align:center;padding:24px 0 20px;">
+    <div style="font-size:24px;font-weight:bold;color:#f59e0b;margin-bottom:4px;">🎯 NullToOffer</div>
+  </div>
+
+  <div style="background:#1e293b;border-radius:10px;padding:28px 32px;margin-bottom:24px;">
+    <h2 style="color:#f59e0b;margin:0 0 16px;font-size:20px;">Your free trial has ended</h2>
+    <p style="color:#e2e8f0;font-size:15px;line-height:1.6;margin:0 0 16px;">
+      Thanks for trying NullToOffer — your free trial run has been used.
+    </p>
+    <p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 16px;">
+      You're now on the waitlist for full access. We'll reach out as soon as a spot opens up.
+      In the meantime, all your job matches from your trial are still waiting on your dashboard.
+    </p>
+    <p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0;">
+      Want to move faster? Just reply to this email and we'll see what we can do.
+    </p>
+  </div>
+
+  <div style="text-align:center;margin-bottom:32px;">
+    <a href="{webapp_url}/dashboard"
+       style="display:inline-block;background:#f59e0b;color:#1a1a2e;text-decoration:none;
+              font-size:15px;font-weight:bold;padding:14px 36px;border-radius:8px;">
+      View Your Dashboard &rarr;
+    </a>
+  </div>
+
+  <div style="text-align:center;font-size:11px;color:#9ca3af;padding-bottom:16px;">
+    Powered by NullToOffer &nbsp;&middot;&nbsp; {site_label}
+  </div>
+
+</div>
+</body>
+</html>"""
+
+    plain_body = (
+        "Your NullToOffer free trial has ended.\n\n"
+        "You're now on the waitlist for full access. We'll reach out as soon as a spot opens up.\n"
+        "All your job matches from your trial are still on your dashboard.\n\n"
+        f"View your dashboard: {webapp_url}/dashboard\n\n"
+        "Want to move faster? Just reply to this email."
+    )
+
+    params = {
+        "from": f"NullToOffer <{os.getenv('FROM_EMAIL', 'hello@nulltooffer.app')}>",
+        "to": [email],
+        "subject": "Your NullToOffer trial has ended - you're on the waitlist",
+        "html": html_body,
+        "text": plain_body,
+    }
+    resend.Emails.send(params)
+    logger.info("Waitlist email sent to %s", email)
+
+
 async def process_user(user: dict) -> int:
-    from database import user_job_exists
+    from database import user_job_exists, get_db
     from scrapers.jobs_scraper import scrape_jobs
     from scrapers.linkedin_posts_scraper import scrape_linkedin_posts
 
@@ -376,6 +443,35 @@ async def process_user(user: dict) -> int:
     locations = user.get("locations", [])
     visa_status = user.get("visa_status", "")
     requires_sponsorship = user.get("requires_sponsorship", False)
+
+    # ── Subscription / trial gate ─────────────────────────────────────────────
+    # To grant Pro access manually: update user document in MongoDB Atlas
+    # db.users.update_one({"clerk_user_id": "user_..."}, {"$set": {"subscription_tier": "pro"}})
+    subscription_tier = user.get("subscription_tier", "free")
+    trial_used = user.get("trial_used", False)
+
+    if subscription_tier in ("pro", "lite"):
+        logger.info("User %s: %s subscription - processing", clerk_user_id[:8], subscription_tier)
+    elif subscription_tier == "free":
+        if not trial_used:
+            logger.info("User %s: free trial run", clerk_user_id[:8])
+            db = get_db()
+            db.users.update_one(
+                {"clerk_user_id": clerk_user_id},
+                {"$set": {"trial_used": True, "trial_started_at": datetime.utcnow().isoformat()}},
+            )
+        else:
+            logger.info("User %s: free trial exhausted - skipping", clerk_user_id[:8])
+            if not user.get("waitlist_email_sent", False):
+                email = await asyncio.to_thread(get_user_email_sync, clerk_user_id)
+                if email:
+                    await asyncio.to_thread(send_waitlist_email, email)
+                    db = get_db()
+                    db.users.update_one(
+                        {"clerk_user_id": clerk_user_id},
+                        {"$set": {"waitlist_email_sent": True}},
+                    )
+            return 0
 
     if not cv_text:
         logger.warning("User %s has no CV uploaded — skipping", clerk_user_id)
