@@ -438,7 +438,10 @@ async def process_user(user: dict) -> int:
 
     clerk_user_id = user["clerk_user_id"]
     short_id = f"{clerk_user_id[:8]}..."
-    cv_text = user.get("cv_text", "")
+    cv_text = user.get("cv_text", "").strip()
+    if len(cv_text) < 100:
+        logger.warning("User %s has no CV or CV too short - skipping scoring", clerk_user_id[:8])
+        return 0
     target_roles = user.get("target_roles", [])
     locations = user.get("locations", [])
     visa_status = user.get("visa_status", "")
