@@ -1,8 +1,8 @@
-# GetHired
+# NullToOffer
 
-GetHired is a job hunting pipeline. It pulls fresh roles from LinkedIn, reads each one against your CV, throws away the ones that don't fit, and tells you why the rest do. Each match also comes with a short gap analysis: what you're missing, what you could pick up quickly, and what you already have that the posting doesn't spell out.
+NullToOffer is a job hunting pipeline. It pulls fresh roles from LinkedIn, reads each one against your CV, throws away the ones that don't fit, and tells you why the rest do. Each match also comes with a short gap analysis: what you're missing, what you could pick up quickly, and what you already have that the posting doesn't spell out.
 
-For a while this ran as a hosted product called **NullToOffer** on DigitalOcean, with a web dashboard and daily emails. That deployment is gone. What's left in this repo is the engine underneath it, and it's built to be cloned, changed and run on your own machine.
+This used to run as a hosted product on DigitalOcean, with a web dashboard and daily emails. That deployment is gone. What's left in this repo is the engine underneath it, and it's built to be cloned, changed and run on your own machine.
 
 ---
 
@@ -24,7 +24,7 @@ It's a fair question. You can hook Apify up to Claude, ask it to scrape LinkedIn
 
 **The output is data, not a paragraph.** Each match is saved with a score, a reason, a sponsor likelihood and lists of gaps and strengths. You can sort it, filter it, build a dashboard on it or track applications. A chat gives you prose you then have to copy somewhere.
 
-|  | Apify + Claude chat | GetHired |
+|  | Apify + Claude chat | NullToOffer |
 |---|---|---|
 | 500 jobs | Crammed into one context, quality drops | 500 separate, focused calls |
 | Scoring rules | Retyped each time, applied loosely | Written in code, applied every time |
@@ -36,13 +36,13 @@ It's a fair question. You can hook Apify up to Claude, ask it to scrape LinkedIn
 | Output | Text | Structured records |
 | Several people | One chat each | One run, separate profiles |
 
-Chatting with Claude is still the better tool for one thing: talking through a specific role once you've found it. GetHired does the finding. Use the chat for what comes after.
+Chatting with Claude is still the better tool for one thing: talking through a specific role once you've found it. NullToOffer does the finding. Use the chat for what comes after.
 
 ---
 
 ## What it actually does
 
-Most job boards match on keywords. That's how you end up with "Senior Staff ML Engineer, 12+ years" in a graduate's inbox, or a perfect role in a city you can't work in. GetHired treats every posting the way a recruiter reading your CV would:
+Most job boards match on keywords. That's how you end up with "Senior Staff ML Engineer, 12+ years" in a graduate's inbox, or a perfect role in a city you can't work in. NullToOffer treats every posting the way a recruiter reading your CV would:
 
 1. **Scrapes two sources.** Standard LinkedIn job listings, plus LinkedIn *posts*: the "we're hiring, DM me" updates recruiters and founders write. Those roles often never reach a job board.
 2. **Cleans up the posts.** Claude reads each post and decides whether it's a real hiring call or just someone talking about hiring. Journalists, newsletters and reshares get dropped. If the model call fails, a regex fallback pulls out the title, company, location and salary.
@@ -99,7 +99,7 @@ In multi-user mode, up to 3 users are processed at once (an `asyncio.Semaphore`)
 ## Project layout
 
 ```
-GetHired/
+NulltoOffer/
 ├── run_local.py                   # Single-user run, writes digest.html
 ├── main.py                        # Multi-user pipeline (the old hosted version)
 ├── database.py                    # MongoDB helpers: users, jobs, user_jobs
@@ -136,8 +136,8 @@ You need Python 3.10 or newer (CI used 3.11), plus API keys for:
 ### 1. Install
 
 ```bash
-git clone <this repo>
-cd GetHired
+git clone https://github.com/akarwal222/NulltoOffer.git
+cd NulltoOffer
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
@@ -285,7 +285,7 @@ The scrapers are plain functions that take a list of search terms and return a l
 Without a server, you still have two easy ways to run it every day:
 
 - **GitHub Actions:** `.github/workflows/daily_scan.yml` runs `main.py` at 08:00 UTC and can also be started by hand. Add your keys as repository secrets. It's built for the multi-user mode, so it needs `MONGODB_URI`.
-- **Your own machine:** a cron job (`0 8 * * * cd /path/to/GetHired && venv/bin/python run_local.py`) or Windows Task Scheduler pointed at the same command.
+- **Your own machine:** a cron job (`0 8 * * * cd /path/to/NulltoOffer && venv/bin/python run_local.py`) or Windows Task Scheduler pointed at the same command.
 
 ---
 
@@ -304,7 +304,7 @@ Narrow searches and the per-user dedup keep this small. Twenty search terms on t
 
 - Scoring and gap logic exist twice: async versions in `main.py` for multi-user runs, and sync versions in `core/` for single-user runs. If you change a prompt, change both.
 - The trial and waitlist logic in `process_user()` (free tier gets one run, then a waitlist email) belonged to the hosted product. Set `subscription_tier` to `"pro"` or `"lite"` to bypass it, or delete that block.
-- Email templates still carry NullToOffer branding and a `nulltooffer.app` fallback URL.
+- Email templates point to `nulltooffer.app` by default. Set `WEBAPP_URL` (and change the footer text) if you host your own front end.
 - Salary from LinkedIn listings is always shown with a `£` sign, whatever the actual currency.
 - Scraping LinkedIn is subject to LinkedIn's terms of service. The Apify actors do the scraping; use them responsibly and at a sensible volume.
 
